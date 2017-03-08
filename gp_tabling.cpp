@@ -414,7 +414,7 @@ void read_input() {
 	cout << "# rooms: " << rooms.size() << endl;
 }
 
-void run_schedualing() {
+void run_scheduling() {
 	time_t start = time(NULL);
 	run(50, true);
 	cout << "timeit: " << time(NULL) - start << " seconds"<<endl;
@@ -427,7 +427,7 @@ int main() {
 	generator.seed(9);
 	read_input();
 	initialize();
-	run_schedualing();
+	run_scheduling();
 	system("pause");
 	return 0;
 }
