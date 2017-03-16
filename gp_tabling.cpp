@@ -33,6 +33,7 @@ struct Klass {
 	Dept *dept;
 	Course *course;
 	Room *room;
+	bool cause_conflict;
 };
 
 typedef vector<Klass> Schedule;
@@ -41,9 +42,9 @@ typedef vector<Schedule> Population;
 
 // global parameters
 
-int n_classes_day = 8;
+int n_classes_day = 6;
 int n_days_week = 7;
-int n_classes_week = 56; // = n_classes_day * n_days_week
+int n_classes_week = n_days_week * n_classes_day; // = n_classes_day * n_days_week
 int n_classes_in_schedule; // best_sched.size()
 
 map<int, Klass> classes;
@@ -57,9 +58,11 @@ map<int, Room> rooms;
 std::default_random_engine generator;
 std::uniform_real_distribution<double> distribution(0.0, 1.0);
 
+
 int randint(int min, int max) { return (int)floor(distribution(generator) * (max - min)) + min; }
 double randreal(double min, double max) { return distribution(generator) * (max - min) + min; }
-double dice() { return randreal(0.0, 1.0); }
+//double dice() { double d = randreal(0.0, 1.0); if (d >= 1.0) cout << "dice error: " << d << endl; return d; }
+double dice() { return 1.0 * rand() / RAND_MAX; }
 
 void schedule_copy(Schedule& src, Schedule& dst) {
 	if (src.size() != dst.size()) dst.resize(src.size());
@@ -87,11 +90,14 @@ int btc, brc, bdc;
 
 double fitness(Schedule& sched) {
 	double conflict_weight = 100.0;
-	double glitches_weight = 0.0;
+	double glitches_weight = 1.0;
 	int n_conflicts = 0;
 	int n_glitches = 0;
 
 	int teacher_conflict = 0, room_conflict = 0, dept_conflict = 0;
+	for (auto it = sched.begin(); it != sched.end(); it++) 
+		it->cause_conflict = false;
+
 	for (auto it = sched.begin(); it != sched.end(); it++) {
 		
 		// insufficient room capacity
@@ -101,28 +107,36 @@ double fitness(Schedule& sched) {
 
 			// spacial conflict
 			if (it->time == jt->time && it->room == jt->room) {
+				it->cause_conflict = true;
 				n_conflicts++; room_conflict++;
 			}
 			// teacher dismemberment conflict
 			if (it->time == jt->time && it->teacher == jt->teacher) {
+				it->cause_conflict = true;
 				n_conflicts++; teacher_conflict++;
 			}
 			// dept dismemberment conflict
 			if (it->time == jt->time && it->dept == jt->dept) {
+				it->cause_conflict = true;
 				n_conflicts++; dept_conflict++;
 			}
 			
 			// same dept, same course but different teacher
-			if (it->dept == jt->dept && it->course == jt->course && it->teacher != jt->teacher) n_glitches++;
+			if (it->dept == jt->dept && it->course == jt->course && it->teacher != jt->teacher) {
+				it->cause_conflict = true;
+				n_glitches++;
+			}
 			// same dept, same courses too close to each other (in time manner)
-			if (it->dept == jt->dept && it->course == jt->course && abs(it->time - jt->time) < n_classes_day / 2) n_glitches++;
+			if (it->dept == jt->dept && it->course == jt->course && abs(it->time - jt->time) < n_classes_day / 2) {
+				it->cause_conflict = true;
+				n_glitches++;
+			}
 
 		}
 	}
 	tc = teacher_conflict; rc = room_conflict; dc = dept_conflict;
 	return -(conflict_weight * n_conflicts + glitches_weight * n_glitches);
 }
-
 
 
 Schedule gen_schedule() {
@@ -145,6 +159,7 @@ Schedule gen_schedule() {
 	return schedule;
 }
 
+
 // genetic parameters
 
 double			best_fitness;
@@ -154,14 +169,15 @@ vector<double>	pop_fitness;
 Population		next_pop;
 
 int pop_size = 20;
-int select_n = 2;
-double mutate_rate = 0.1;
-double crossover_rate = 0.75;
-double mutate_decay = 0.98;
+int select_n = 4;
+double mutate_rate = 1e-4;
+double mutate_rate_conflict = 0.98;	// if a lot of blank cell, increase mutate_rate_conflict; else increase mutate_rate
+double crossover_rate = 0.5;
+double mutate_decay = 1;
 
 // annealing parameters
-double init_temperature;
-double current_temperature;
+double init_temperature = 0.08;
+double current_temperature = init_temperature;
 
 double temperature() {
 	current_temperature -= 1e-3;
@@ -178,7 +194,9 @@ void initialize() {
 		pop.push_back(s);
 		
 		pop_fitness[i] = fitness(s);
-		if (pop_fitness[i] > pop_fitness[best_i]) best_i = i;
+		if (pop_fitness[i] > pop_fitness[best_i]) {
+			best_i = i;
+		}
 	}
 
 	best_fitness = pop_fitness[best_i];
@@ -186,6 +204,9 @@ void initialize() {
 	best_sched.clear();
 	best_sched.resize(n_classes_in_schedule);
 	schedule_copy(pop[best_i], best_sched);
+
+	fitness(best_sched);
+	btc = tc; brc = rc; bdc = dc;
 }
 
 vector<Schedule*> select() {
@@ -210,7 +231,7 @@ vector<Schedule*> select() {
 		fitness(best_sched);
 		btc = tc; brc = rc; bdc = dc;
 	}
-	//else sa = dice() < temperature() ? 1 : 0;	// SA: discard the best individual with probability P
+	// else sa = dice() < temperature() ? 1 : 0;	// SA: discard the best individual with probability P
 	for (int i = 0; i < select_n; i++)
 		winners.push_back(zips[i + sa].schedule);
 	
@@ -228,9 +249,10 @@ Schedule crossover(const Schedule& s1, const Schedule& s2) {
 
 void mutate(Schedule& s) {
 	for (int i = 0; i < n_classes_in_schedule; i++) {
-		if (dice() < mutate_rate) s[i].room = &rooms[randint(0, rooms.size())];
-		if (dice() < mutate_rate) s[i].teacher = s[i].course->teachers[randint(0, s[i].course->teachers.size())];
-		if (dice() < mutate_rate) s[i].time = randint(0, n_classes_week);
+		double rate = s[i].cause_conflict ? mutate_rate_conflict : mutate_rate;
+		if (dice() < rate) s[i].room = &rooms[randint(0, rooms.size())];
+		if (dice() < rate) s[i].teacher = s[i].course->teachers[randint(0, s[i].course->teachers.size())];
+		if (dice() < rate) s[i].time = randint(0, n_classes_week);
 	}
 }
 
@@ -281,8 +303,8 @@ void evolve() {
 		pop_fitness[i] = fitness(pop[i]);
 
 	// mutate rate decrease
-	if(mutate_rate > 1e-3)
-		mutate_rate *= mutate_decay;
+	// if(mutate_rate > 1e-3)
+	mutate_rate *= mutate_decay;
 }
 
 
@@ -373,7 +395,7 @@ void read_input() {
 	// room information
 	in = new ifstream("classroom_info", ios::in);
 	int room_id, capa;
-	while (*in) {
+	while (in->peek() != EOF) {
 		*in >> room_id >> capa;
 		rooms[room_id] = { room_id, capa };
 	}
@@ -382,7 +404,7 @@ void read_input() {
 	// course information
 	in = new ifstream("course_info", ios::in);
 	int course_id, teacher_id, time_per_week;
-	while (*in) {
+	while (in->peek() != EOF) {
 		*in >> course_id >> teacher_id >> time_per_week;
 		if (courses.find(course_id) == courses.end()) {
 			courses[course_id].id = course_id;
@@ -397,7 +419,7 @@ void read_input() {
 	// department information
 	in = new ifstream("dept_info", ios::in);
 	int dept_id, n_students; //, course_id
-	while (*in) {
+	while (in->peek() != EOF) {
 		*in >> dept_id >> n_students >> course_id;
 		if (depts.find(dept_id) == depts.end()) { 
 			depts[dept_id].id = dept_id;
@@ -422,11 +444,98 @@ void run_scheduling() {
 	print_table(table);
 }
 
+Schedule load_schedule(const string& filename) {
+	Schedule schedule;
+	map<int, map<int, int> > dept_course_count;
+	dept_course_count.clear();
+
+	for (auto dpair : depts) {
+		Dept d = dpair.second;
+		if (dept_course_count.find(d.id) == dept_course_count.end())
+			dept_course_count[d.id] = map<int, int>();
+		for (Course *c : d.courses) {
+			dept_course_count[d.id][c->id] = c->time_per_week;
+		}
+	}
+
+	fstream in(filename, ios::in);
+
+	int line_count = 0;
+
+	int dept_id, time, course_id, teacher_id, room_id;
+	while (in.peek()!=EOF) {
+		in >> dept_id >> time >> course_id >> teacher_id >> room_id;
+		Klass k;
+		k.course = &courses[course_id];
+		k.dept = &depts[dept_id];
+		k.room = &rooms[room_id];
+		k.teacher = teacher_id;
+		k.time = time;
+		schedule.push_back(k);
+
+		dept_course_count[dept_id][course_id] --;
+		if (dept_course_count[dept_id][course_id] < 0)
+			cout << "ERROR ON DEPT " << dept_id << " COURSE " << course_id << endl;
+		line_count++;
+	}
+
+	cout << line_count << "/";
+	
+
+	for (auto dpair : depts) {
+		Dept d = dpair.second;
+		for (Course* c : d.courses) {
+			for (int _ = 0; _ < dept_course_count[d.id][c->id]; _++) {
+				Klass k;
+				k.course = c;
+				k.dept = &depts[d.id];// &d
+				k.room = &rooms[randint(0, rooms.size())];
+				k.teacher = c->teachers[randint(0, c->teachers.size())];
+				k.time = randint(0, n_classes_week);
+				schedule.push_back(k);
+				line_count++;
+			}
+		}
+	}
+
+	cout << line_count << " class units are filled in." << endl;
+
+	return schedule;
+}
+
+void load_and_initialize(const string& filename) {
+	pop.clear();
+	pop_fitness.resize(pop_size);
+
+	int best_i = 0;
+	for (int i = 0; i < pop_size; i++) {
+		Schedule s;
+		if (i == 0) s = load_schedule(filename);
+		else s = gen_schedule();
+		pop.push_back(s);
+
+		pop_fitness[i] = fitness(s);
+		if (pop_fitness[i] > pop_fitness[best_i]) {
+			best_i = i;
+		}
+	}
+
+	best_fitness = pop_fitness[best_i];
+	n_classes_in_schedule = pop[best_i].size();
+	best_sched.clear();
+	best_sched.resize(n_classes_in_schedule);
+	schedule_copy(pop[best_i], best_sched);
+
+	fitness(best_sched);
+	btc = tc; brc = rc; bdc = dc;
+}
+
 //int main(int argc, char** argv) {
 int main() {
-	generator.seed(9);
+	generator.seed(6);
 	read_input();
-	initialize();
+	//initialize();
+	load_and_initialize("init.txt");
 	run_scheduling();
 	system("pause");
 	return 0;
