@@ -8,7 +8,34 @@
 #include <ctime>
 using namespace std;
 
+
+// constants 
 const int NO_CLASS = -1;
+
+// hyperparameters:
+int n_plateau_to_abandon = 50;
+
+unsigned int random_seed = (unsigned int) time(NULL);
+
+int pop_size = 20;
+int select_n = 4;
+double mutate_rate = 0.1;
+double mutate_rate_glitch = 0.98;
+double mutate_rate_conflict = 0.98;	// if a lot of blank cell, increase mutate_rate_conflict; else increase mutate_rate
+double crossover_rate = 0.5;
+double mutate_decay = 0.998;
+
+// annealing parameters
+double init_temperature = 0.08;
+double current_temperature = init_temperature;
+
+// problem set
+int n_classes_day = 6;
+int n_days_week = 7;
+int n_classes_week = n_days_week * n_classes_day; // = n_classes_day * n_days_week
+int n_classes_in_schedule; // best_sched.size()
+
+
 
 struct Course {
 	int id;				// for reverse locating
@@ -34,18 +61,12 @@ struct Klass {
 	Course *course;
 	Room *room;
 	bool cause_conflict;
+	bool cause_glitch;
 };
 
 typedef vector<Klass> Schedule;
 typedef vector<Schedule> Population;
 
-
-// global parameters
-
-int n_classes_day = 6;
-int n_days_week = 7;
-int n_classes_week = n_days_week * n_classes_day; // = n_classes_day * n_days_week
-int n_classes_in_schedule; // best_sched.size()
 
 map<int, Klass> classes;
 map<int, Dept> depts;
@@ -53,7 +74,6 @@ map<int, Course> courses;
 map<int, Room> rooms;
 
 
-// functions
 
 std::default_random_engine generator;
 std::uniform_real_distribution<double> distribution(0.0, 1.0);
@@ -61,8 +81,7 @@ std::uniform_real_distribution<double> distribution(0.0, 1.0);
 
 int randint(int min, int max) { return (int)floor(distribution(generator) * (max - min)) + min; }
 double randreal(double min, double max) { return distribution(generator) * (max - min) + min; }
-//double dice() { double d = randreal(0.0, 1.0); if (d >= 1.0) cout << "dice error: " << d << endl; return d; }
-double dice() { return 1.0 * rand() / RAND_MAX; }
+double dice() { return randreal(0.0, 1.0); }
 
 void schedule_copy(Schedule& src, Schedule& dst) {
 	if (src.size() != dst.size()) dst.resize(src.size());
@@ -85,8 +104,13 @@ int32_t hash_schedule(const Schedule& s) {
 	return hash;
 }
 
+
+
+// conflicts
 int tc, rc, dc;
 int btc, brc, bdc;
+
+
 
 double fitness(Schedule& sched) {
 	double conflict_weight = 100.0;
@@ -95,8 +119,8 @@ double fitness(Schedule& sched) {
 	int n_glitches = 0;
 
 	int teacher_conflict = 0, room_conflict = 0, dept_conflict = 0;
-	for (auto it = sched.begin(); it != sched.end(); it++) 
-		it->cause_conflict = false;
+	for (auto it = sched.begin(); it != sched.end(); it++)
+		it->cause_conflict = it->cause_glitch = false;
 
 	for (auto it = sched.begin(); it != sched.end(); it++) {
 		
@@ -123,12 +147,12 @@ double fitness(Schedule& sched) {
 			
 			// same dept, same course but different teacher
 			if (it->dept == jt->dept && it->course == jt->course && it->teacher != jt->teacher) {
-				it->cause_conflict = true;
+				it->cause_glitch = true;
 				n_glitches++;
 			}
 			// same dept, same courses too close to each other (in time manner)
 			if (it->dept == jt->dept && it->course == jt->course && abs(it->time - jt->time) < n_classes_day / 2) {
-				it->cause_conflict = true;
+				it->cause_glitch = true;
 				n_glitches++;
 			}
 
@@ -160,7 +184,7 @@ Schedule gen_schedule() {
 }
 
 
-// genetic parameters
+// genetic variables
 
 double			best_fitness;
 Schedule		best_sched;
@@ -168,16 +192,7 @@ Population		pop;
 vector<double>	pop_fitness;
 Population		next_pop;
 
-int pop_size = 20;
-int select_n = 4;
-double mutate_rate = 1e-4;
-double mutate_rate_conflict = 0.98;	// if a lot of blank cell, increase mutate_rate_conflict; else increase mutate_rate
-double crossover_rate = 0.5;
-double mutate_decay = 1;
 
-// annealing parameters
-double init_temperature = 0.08;
-double current_temperature = init_temperature;
 
 double temperature() {
 	current_temperature -= 1e-3;
@@ -249,7 +264,12 @@ Schedule crossover(const Schedule& s1, const Schedule& s2) {
 
 void mutate(Schedule& s) {
 	for (int i = 0; i < n_classes_in_schedule; i++) {
-		double rate = s[i].cause_conflict ? mutate_rate_conflict : mutate_rate;
+		double rate = mutate_rate;
+		if (s[i].cause_conflict)
+			rate = mutate_rate_conflict;
+		else if (s[i].cause_glitch)
+			rate = mutate_rate_glitch;
+			
 		if (dice() < rate) s[i].room = &rooms[randint(0, rooms.size())];
 		if (dice() < rate) s[i].teacher = s[i].course->teachers[randint(0, s[i].course->teachers.size())];
 		if (dice() < rate) s[i].time = randint(0, n_classes_week);
@@ -319,6 +339,8 @@ void run(int n_iterations, bool show_progress=false) {
 	int t = 0;
 	if (threshold < -1e-8)
 	{
+		int n_plateau = 0;
+		double last_best = -1e6;
 		while (best_fitness < threshold)
 		{
 			evolve();
@@ -326,6 +348,14 @@ void run(int n_iterations, bool show_progress=false) {
 				printf_s("Iteration %d: best fitness %.3lf; Conflicts: TC %d, RC %d, DC %d\n", t + 1, best_fitness, btc, brc, bdc);
 			}
 			t++;
+			if (best_fitness != last_best) {
+				last_best = best_fitness;
+				n_plateau = 0;
+			}
+			else n_plateau++;
+			
+			if (n_plateau == n_plateau_to_abandon && btc+brc+bdc==0) 
+				break;
 		}
 	}
 
@@ -386,14 +416,16 @@ void print_table(Timetable& table) {
 }
 
 
-void read_input() {
+void read_input(const string& classroom_info,
+				const string& course_info,
+				const string& dept_info) {
 	
 	rooms.clear(); courses.clear(); depts.clear();
 
 	ifstream *in;
 
 	// room information
-	in = new ifstream("classroom_info", ios::in);
+	in = new ifstream(classroom_info, ios::in);
 	int room_id, capa;
 	while (in->peek() != EOF) {
 		*in >> room_id >> capa;
@@ -402,7 +434,7 @@ void read_input() {
 	in->close(); delete in;
 	
 	// course information
-	in = new ifstream("course_info", ios::in);
+	in = new ifstream(course_info, ios::in);
 	int course_id, teacher_id, time_per_week;
 	while (in->peek() != EOF) {
 		*in >> course_id >> teacher_id >> time_per_week;
@@ -417,7 +449,7 @@ void read_input() {
 
 
 	// department information
-	in = new ifstream("dept_info", ios::in);
+	in = new ifstream(dept_info, ios::in);
 	int dept_id, n_students; //, course_id
 	while (in->peek() != EOF) {
 		*in >> dept_id >> n_students >> course_id;
@@ -480,7 +512,6 @@ Schedule load_schedule(const string& filename) {
 	}
 
 	cout << line_count << "/";
-	
 
 	for (auto dpair : depts) {
 		Dept d = dpair.second;
@@ -502,6 +533,7 @@ Schedule load_schedule(const string& filename) {
 
 	return schedule;
 }
+
 
 void load_and_initialize(const string& filename) {
 	pop.clear();
@@ -530,14 +562,76 @@ void load_and_initialize(const string& filename) {
 	btc = tc; brc = rc; bdc = dc;
 }
 
-//int main(int argc, char** argv) {
-int main() {
-	generator.seed(6);
-	read_input();
-	//initialize();
-	load_and_initialize("init.txt");
+void dump_schedule(Schedule& schedule, const string& filename) {
+
+	fstream fout(filename, ios::out);
+
+	int line_count = 0;
+
+	int dept_id, time, course_id, teacher_id, room_id;
+	for(auto k : schedule){
+		fout << k.dept->id << "\t" 
+			 << k.time << "\t" 
+			 << k.course->id << "\t" 
+			 << k.teacher << "\t" 
+			 << k.room->id << endl;
+		line_count++;
+	}
+
+	fout.close();
+
+	cout << line_count << " lines of schedule dumped." << endl;
+}
+
+int main(int argc, char** argv) {
+	// args: classroom_info, course_info, dept_info [, output_file]
+	if (argc < 4)
+		return 1;
+
+
+	string init_file = "";
+	string config_file = "";
+	string output_file = "best_schedule";
+
+	for (int i = 4; i < argc; ++i) {
+		string arg = argv[i];
+		if ((arg == "-i") || (arg == "--init")) {
+			if (i + 1 < argc) 
+				init_file = argv[++i];
+			else { // Uh-oh, there was no argument to the destination option.
+				std::cerr << "--init option requires one argument." << std::endl;
+				return 1;
+			}
+		}
+		if ((arg == "-c") || (arg == "--config")) {
+			if (i + 1 < argc) 
+				config_file = argv[++i]; 
+
+			else { // Uh-oh, there was no argument to the destination option.
+				std::cerr << "--config option requires one argument." << std::endl;
+				return 1;
+			}
+		}
+		if ((arg == "-o") || (arg == "--output")) {
+			if (i + 1 < argc) 
+				output_file = argv[++i];
+			else { // Uh-oh, there was no argument to the destination option.
+				std::cerr << "--output option requires one argument." << std::endl;
+				return 1;
+			}
+		}
+	}
+
+	generator.seed(9);
+	read_input(argv[1], argv[2], argv[3]);
+
+	if(init_file != "")
+		load_and_initialize(init_file);
+	else
+		initialize();
+
 	run_scheduling();
-	system("pause");
+	dump_schedule(best_sched, output_file);
 	return 0;
 }
 
