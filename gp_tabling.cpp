@@ -480,7 +480,7 @@ void read_input(const string& classroom_info,
 
 void run_scheduling() {
 	time_t start = time(NULL);
-	run(-1e-8, true);
+	run(-1.0, true);
 	cout << "timeit: " << time(NULL) - start << " seconds"<<endl;
 	Timetable table = fill_table(best_sched);
 	print_table(table);
