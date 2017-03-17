@@ -328,14 +328,16 @@ void evolve() {
 }
 
 
-void run(int n_iterations, bool show_progress=false) {
-	//for (int t = 0; t < n_iterations; t++) {
-	//	evolve();
-	//	if (show_progress) {
-	//		printf_s("Iteration %d: best fitness %.3lf; Conflicts: TC %d, RC %d, DC %d\n", t + 1, best_fitness, btc, brc, bdc);
-	//	}
-	//}
-	double threshold = -1.0;
+void run_iterations(int n_iterations=20000, bool show_progress = false) {
+	for (int t = 0; t < n_iterations; t++) {
+		evolve();
+		if (show_progress) {
+			printf_s("Iteration %d: best fitness %.3lf; Conflicts: TC %d, RC %d, DC %d\n", t + 1, best_fitness, btc, brc, bdc);
+		}
+	}
+}
+
+void run(double threshold = -1e-8, bool show_progress=false) {
 	int t = 0;
 	if (threshold < -1e-8)
 	{
@@ -368,20 +370,23 @@ struct KlassInstance {
 	int room;
 };
 
-typedef vector< vector < KlassInstance > > Timetable;
+typedef map<int, vector < KlassInstance > > Timetable;
 
 
 Timetable fill_table(Schedule& schedule) {
 	Timetable table_for_depts;
 	int n_dept = depts.size();
 	
-	table_for_depts.resize(n_dept);
+	// table_for_depts.resize(n_dept); // here map, no vector
 
-	for (int d = 0; d < n_dept; d++)
-	{
-		table_for_depts[d].resize(n_classes_week);
+	for (auto dpair : depts) {
+		Dept d = dpair.second;
+		int id = d.id;
+		if (table_for_depts.find(id) == table_for_depts.end())
+			table_for_depts[id] = vector<KlassInstance>();
+		table_for_depts[id].resize(n_classes_week);
 		for (int t = 0; t < n_classes_week; t++)
-			table_for_depts[d][t] = { d, NO_CLASS, NO_CLASS, NO_CLASS };
+			table_for_depts[id][t] = { id, NO_CLASS, NO_CLASS, NO_CLASS };
 	}
 
 	for (Klass k : schedule) {
@@ -400,8 +405,9 @@ Timetable fill_table(Schedule& schedule) {
 void print_table(Timetable& table) {
 	int n = depts.size();
 	int w = n_days_week, h = n_classes_day;
-	for (int i = 0; i < n; i++) {
-		cout << "\n\n---------- Class: " << i + 1 << "-----------\n" << endl;
+	for (auto pair : depts){
+		int i = pair.second.id;
+		cout << "\n\n---------- Class: " << i << "-----------\n" << endl;
 		cout << "\tMon\tTue\tWed\tThu\tFri\tSat\tSun" << endl;
 		for (int y = 0; y < h; y++) {
 			cout << y + 1;
@@ -429,6 +435,7 @@ void read_input(const string& classroom_info,
 	int room_id, capa;
 	while (in->peek() != EOF) {
 		*in >> room_id >> capa;
+		if (in->fail())break;
 		rooms[room_id] = { room_id, capa };
 	}
 	in->close(); delete in;
@@ -438,6 +445,7 @@ void read_input(const string& classroom_info,
 	int course_id, teacher_id, time_per_week;
 	while (in->peek() != EOF) {
 		*in >> course_id >> teacher_id >> time_per_week;
+		if (in->fail())break;
 		if (courses.find(course_id) == courses.end()) {
 			courses[course_id].id = course_id;
 			courses[course_id].time_per_week = time_per_week;
@@ -453,6 +461,7 @@ void read_input(const string& classroom_info,
 	int dept_id, n_students; //, course_id
 	while (in->peek() != EOF) {
 		*in >> dept_id >> n_students >> course_id;
+		if (in->fail())break;
 		if (depts.find(dept_id) == depts.end()) { 
 			depts[dept_id].id = dept_id;
 			depts[dept_id].n_students = n_students;
@@ -468,13 +477,15 @@ void read_input(const string& classroom_info,
 	cout << "# rooms: " << rooms.size() << endl;
 }
 
+
 void run_scheduling() {
 	time_t start = time(NULL);
-	run(50, true);
+	run(-1e-8, true);
 	cout << "timeit: " << time(NULL) - start << " seconds"<<endl;
 	Timetable table = fill_table(best_sched);
 	print_table(table);
 }
+
 
 Schedule load_schedule(const string& filename) {
 	Schedule schedule;
@@ -495,8 +506,9 @@ Schedule load_schedule(const string& filename) {
 	int line_count = 0;
 
 	int dept_id, time, course_id, teacher_id, room_id;
-	while (in.peek()!=EOF) {
+	while (in.peek() != EOF) {
 		in >> dept_id >> time >> course_id >> teacher_id >> room_id;
+		if (in.fail()) { in.close(); break; }
 		Klass k;
 		k.course = &courses[course_id];
 		k.dept = &depts[dept_id];
@@ -506,8 +518,12 @@ Schedule load_schedule(const string& filename) {
 		schedule.push_back(k);
 
 		dept_course_count[dept_id][course_id] --;
-		if (dept_course_count[dept_id][course_id] < 0)
-			cout << "ERROR ON DEPT " << dept_id << " COURSE " << course_id << endl;
+		if (dept_course_count[dept_id][course_id] < 0) {
+			cout << "ERROR AT LINE " << line_count + 1 << ": ";
+			cout << "DEPT " << dept_id << " COURSE " << course_id << endl;
+			system("pause");
+			exit(1);
+		}
 		line_count++;
 	}
 
@@ -565,10 +581,13 @@ void load_and_initialize(const string& filename) {
 void dump_schedule(Schedule& schedule, const string& filename) {
 
 	fstream fout(filename, ios::out);
+	if (fout.fail()) {
+		cout << "open outstream failed, abort." << endl;
+		exit(1);
+	}
 
 	int line_count = 0;
 
-	int dept_id, time, course_id, teacher_id, room_id;
 	for(auto k : schedule){
 		fout << k.dept->id << "\t" 
 			 << k.time << "\t" 
@@ -584,6 +603,7 @@ void dump_schedule(Schedule& schedule, const string& filename) {
 }
 
 int main(int argc, char** argv) {
+
 	// args: classroom_info, course_info, dept_info [, output_file]
 	if (argc < 4)
 		return 1;
@@ -591,7 +611,7 @@ int main(int argc, char** argv) {
 
 	string init_file = "";
 	string config_file = "";
-	string output_file = "best_schedule";
+	string output_file = "best_schedule.txt";
 
 	for (int i = 4; i < argc; ++i) {
 		string arg = argv[i];
